@@ -1,13 +1,24 @@
 import sys
 import os
 import pwd
-import __builtin__
+
+try:
+  import builtins as __builtin__
+except ImportError:
+  import __builtin__
 
 from os.path import abspath, basename, dirname
-try:
-  from cStringIO import StringIO
-except ImportError:
-  from StringIO import StringIO
+
+# BytesIO is needed on py3 as StringIO does not operate on byte input anymore
+# We could use BytesIO on py2 as well but it is slower than StringIO
+if sys.version_info >= (3, 0):
+  from io import BytesIO as StringIO
+else:
+  try:
+    from cStringIO import StringIO
+  except ImportError:
+    from StringIO import StringIO
+
 try:
   import cPickle as pickle
   USING_CPICKLE = True
@@ -96,22 +107,29 @@ def run_twistd_plugin(filename):
     runApp(config)
 
 
-def parseDestinations(destination_strings):
-  destinations = []
-
-  for dest_string in destination_strings:
-    parts = dest_string.strip().split(':')
-    if len(parts) == 2:
-      server, port = parts
-      instance = None
-    elif len(parts) == 3:
-      server, port, instance = parts
+def parseDestination(dest_string):
+    s = dest_string.strip()
+    bidx = s.rfind(']:')    # find closing bracket and following colon.
+    cidx = s.find(':')
+    if s.startswith('[') and bidx is not None:
+        server = s[1:bidx]
+        port = s[bidx + 2:]
+    elif cidx is not None:
+        server = s[:cidx]
+        port = s[cidx + 1:]
     else:
-      raise ValueError("Invalid destination string \"%s\"" % dest_string)
+        raise ValueError("Invalid destination string \"%s\"" % dest_string)
 
-    destinations.append((server, int(port), instance))
+    if ':' in port:
+        port, _, instance = port.partition(':')
+    else:
+        instance = None
 
-  return destinations
+    return server, int(port), instance
+
+
+def parseDestinations(destination_strings):
+    return [parseDestination(dest_string) for dest_string in destination_strings]
 
 
 # Yes this is duplicated in whisper. Yes, duplication is bad.
@@ -207,7 +225,10 @@ else:
 
     @classmethod
     def loads(cls, pickle_string):
-      return cls(StringIO(pickle_string)).load()
+      if sys.version_info >= (3, 0):
+        return cls(StringIO(pickle_string), encoding='utf-8').load()
+      else:
+        return cls(StringIO(pickle_string)).load()
 
 
 def get_unpickler(insecure=False):
@@ -240,8 +261,10 @@ class TokenBucket(object):
       if blocking:
         tokens_needed = cost - self._tokens
         seconds_per_token = 1 / self.fill_rate
-        seconds_left = seconds_per_token * self.fill_rate
-        sleep(self.timestamp + seconds_left - time())
+        seconds_left = seconds_per_token * tokens_needed
+        time_to_sleep = self.timestamp + seconds_left - time()
+        if time_to_sleep > 0:
+            sleep(time_to_sleep)
         self._tokens -= cost
         return True
       return False
